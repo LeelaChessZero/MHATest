@@ -10,6 +10,7 @@
 constexpr int batch_size = 128;
 constexpr int num_heads = 12;
 constexpr int depth = 64;
+constexpr bool useBias = true;
 
 constexpr int iterations = 10000;
 
@@ -213,6 +214,8 @@ void Softmax(int N, int C, T* output, const T* input, const T* input2, cudaStrea
 
 void testBaselineMHA(half *output, half *input, half *skip, half *inter)
 {
+    skip = useBias ? skip : nullptr;
+
     // Run existing implementation of MHA present in lc0 codebase
     half** scratch_rel_ptrs;
 
@@ -322,7 +325,7 @@ void testCutlassFusedMHA(half* output, half* input, half* skip, half* inter)
         kKeysPerBlock,
         kSingleValueIteration,
         false,                // Supports dropout
-        true                  // Supports bias
+        useBias               // Supports bias
     >;
 
     typename Attention::Params p;
@@ -365,12 +368,11 @@ void testCutlassFusedMHA(half* output, half* input, half* skip, half* inter)
         p.o_strideM = p.head_dim_value * p.num_heads;
 
         // Ankan - TODO: check layout of the skip connection tensor.
-        p.bias_strideH = 64;
-        p.bias_strideM = 64 * 64;
-        p.bias_strideB = num_heads * p.bias_strideM;
+        p.bias_strideH = 64 * 64;
+        p.bias_strideM = 64;
+        p.bias_strideB = num_heads * p.bias_strideH;
     }
 
-    // launch kernel :)
     constexpr auto kernel_fn = attention_kernel_batched_impl<Attention>;
     int smem_bytes = sizeof(typename Attention::SharedStorage);
     if (smem_bytes > 0xc000) {
@@ -471,8 +473,11 @@ void testCPUMHA(half* op, half* input, half* sk)
     }
 
     // 2. skip connection addition
-    for (int i = 0; i < batch_size * num_heads * 64 * 64; i++)
-        inter[i] += skip[i];
+    if (useBias)
+    {
+        for (int i = 0; i < batch_size * num_heads * 64 * 64; i++)
+            inter[i] += skip[i];
+    }
 
     // 3. softmax
     int outer_size = batch_size * num_heads * 64;
